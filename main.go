@@ -39,6 +39,7 @@ func main() {
 	//Registra el handler para el evento de "listo" (bot conectado)
 	dg.AddHandler(utils.Ready)
 	dg.AddHandler(utils.InteractionCreate)
+	dg.AddHandler(utils.GuildDelete)
 
 	// Inicia la conexión con Discord
 	err = dg.Open()

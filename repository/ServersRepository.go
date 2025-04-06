@@ -3,6 +3,7 @@ package repository
 import (
 	"fmt"
 	"github.com/google/uuid"
+	"log"
 	"servers_status/model"
 )
 
@@ -21,4 +22,22 @@ func GetServer(query string) model.Servers {
 	var server model.Servers
 	DB.Debug().Model(model.Servers{}).Where(query).Order("created_at DESC").Limit(1).Find(&server)
 	return server
+}
+
+func UpdateServer(data model.Servers) (model.Servers, error) {
+	result := DB.Debug().Model(&data).Omit("uuid").Updates(data).Find(&data)
+	if result.Error != nil {
+		log.Print(result.Error)
+		return data, result.Error
+	}
+	return data, nil
+}
+
+func DelServer(query string) error {
+	result := DB.Debug().Where(query).Model(&model.Servers{}).Unscoped().Delete(&model.Servers{})
+	if result.Error != nil {
+		log.Print(result.Error)
+		return result.Error
+	}
+	return nil
 }

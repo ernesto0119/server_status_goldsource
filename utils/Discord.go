@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/bwmarrin/discordgo"
 	"log"
@@ -10,6 +11,11 @@ import (
 	"strings"
 	"time"
 )
+
+type DiscordHTTPError struct {
+	StatusCode int
+	Body       map[string]interface{} // O una estructura más específica si la conoces
+}
 
 var (
 	MessageID   string
@@ -46,14 +52,20 @@ var commands = []*discordgo.ApplicationCommand{
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "ip",
-				Description: "IP",
+				Description: "IP Actual",
 				Required:    true,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "ip_nueva",
+				Description: "IP Nueva",
+				Required:    false,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "orden",
 				Description: "Orden",
-				Required:    true,
+				Required:    false,
 			},
 		},
 	},
@@ -84,6 +96,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		}
 	},
 	"crear": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		guilid := i.GuildID
 		channel := i.ChannelID
 		message_id := i.Interaction.ID
 		ip := ""
@@ -110,7 +123,8 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		msg := ""
 		if channel_info.DiscordChannelId == "" {
 			//Si no encuentra registrado, se procede a crear
-			channel_info, msg = controllers.CreateChannel(channel, message_id)
+			fmt.Println("Se ha registrado el channel id: " + channel)
+			channel_info, msg = controllers.CreateChannel(guilid, channel, message_id)
 			if channel_info.DiscordChannelId == "" {
 				SendMsg(s, i, msg)
 				return
@@ -141,25 +155,105 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		SendMsg(s, i, "Servidor registrado")
 	},
 	"editar": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		channel := i.ChannelID
+		ip := ""
+		ip_nueva := ""
+		orden := ""
+
+		options := i.ApplicationCommandData().Options
+		for _, option := range options {
+			switch option.Name {
+			case "ip":
+				ip = option.StringValue()
+			case "ip_nueva":
+				ip_nueva = option.StringValue()
+			case "orden":
+				orden = option.StringValue()
+			}
+		}
+
+		//Buscar si la ip mandada existe
+		servidor, err := GetServerInfo(ip)
+		if err != nil {
+			SendMsg(s, i, err.Error())
+			return
+		}
+
+		//Buscar el canal
+		channel_info := controllers.GetChannel(channel)
+
+		if channel_info.DiscordChannelId == "" {
+			//Si el canal buscado no fue encontrado, se devuelve error
+			SendMsg(s, i, "No hemos encontrado los registros en nuestra base de datos")
+		}
+
+		//Buscar si el servidor se encuentra registrado en el canal
+		server_found := controllers.GetServer(fmt.Sprintf("%s", channel_info.Uuid), ip)
+		if server_found.ServerIp == "" {
+			SendMsg(s, i, "El servidor que se intenta editar no se encuentra registrado en este canal")
+			return
+		}
+
+		//Si fue encontrada la ip, se procede a editar con la nueva ip en caso de que se haya mandando
+		if ip_nueva != "" {
+			server_found.ServerIp = ip_nueva
+		}
+		//Si orden fue mandado se actualiza
+		if orden != "" {
+			server_found.ServerOrder = orden
+		}
+
+		//Se actualiza el nombre del servidor
+		server_found.ServerName = servidor.Name
+		msg := controllers.UpdateServer(server_found)
+
+		err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "Channel ID: " + i.ChannelID + " Message id:" + i.Interaction.ID,
+				Content: msg,
 			},
 		})
 		if err != nil {
-			log.Println("Error responding to ping:", err)
+			log.Println("Error al responder un mensaje:", err)
 		}
 	},
 	"eliminar": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+
+		channel := i.ChannelID
+		ip := ""
+		options := i.ApplicationCommandData().Options
+		for _, option := range options {
+			switch option.Name {
+			case "ip":
+				ip = option.StringValue()
+			}
+		}
+
+		//Buscar el canal
+		channel_info := controllers.GetChannel(channel)
+
+		if channel_info.DiscordChannelId == "" {
+			//Si el canal buscado no fue encontrado, se devuelve error
+			SendMsg(s, i, "No hemos encontrado los registros en nuestra base de datos")
+		}
+
+		//Buscar si el servidor se encuentra registrado en el canal
+		server_found := controllers.GetServer(fmt.Sprintf("%s", channel_info.Uuid), ip)
+		if server_found.ServerIp == "" {
+			SendMsg(s, i, "El servidor que se intenta eliminar no se encuentra registrado en este canal")
+			return
+		}
+
+		msg := controllers.DeleteServer(server_found.ChannelId, server_found.ServerIp)
+
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "Channel ID: " + i.ChannelID + " Message id:" + i.Interaction.ID,
+				Content: msg,
 			},
 		})
 		if err != nil {
-			log.Println("Error responding to ping:", err)
+			log.Println("Error al eliminar un servidor:", err)
 		}
 	},
 }
@@ -189,7 +283,12 @@ func Ready(s *discordgo.Session, event *discordgo.Ready) {
 		for _, channel := range channels {
 			//Si el servidor tiene pendiente eliminar mensajes
 			if channel.DiscordMessageIdDelete != "" {
-				_ = deleteAllMessagesExcept(s, channel.DiscordChannelId, channel.DiscordMessageId)
+				err := deleteAllMessagesExcept(s, channel.DiscordChannelId, channel.DiscordMessageId)
+				if err != nil {
+					log.Printf("Error al eliminar los mensajes: %v", err)
+					VerfiicarRespuesta(err.Error(), channel.DiscordChannelId)
+					continue
+				}
 				//Actualizar la informacion del canal con el nuevo id del mensaje a eliminar
 				channel.DiscordMessageIdDelete = ""
 				controllers.UpdateChannel(channel)
@@ -201,7 +300,8 @@ func Ready(s *discordgo.Session, event *discordgo.Ready) {
 				initialMessage, err := s.ChannelMessageSend(channel.DiscordChannelId, "Mensaje inicial...")
 				if err != nil {
 					log.Printf("Error al enviar el mensaje inicial: %v", err)
-					return
+					VerfiicarRespuesta(err.Error(), channel.DiscordChannelId)
+					continue
 				}
 				MessageID = initialMessage.ID
 				fmt.Printf("Mensaje inicial creado con ID: %s en el canal: %s\n", MessageID, channel.DiscordChannelId)
@@ -210,7 +310,11 @@ func Ready(s *discordgo.Session, event *discordgo.Ready) {
 				res, errores := controllers.UpdateChannel(channel)
 				if !res {
 					//Si ocurrio un error se envia un mensaje
-					_, _ = s.ChannelMessageSend(channel.DiscordChannelId, errores)
+					_, err = s.ChannelMessageSend(channel.DiscordChannelId, errores)
+					if err != nil {
+						log.Printf("Error al enviar el mensaje inicial: %v", err)
+						VerfiicarRespuesta(err.Error(), channel.DiscordChannelId)
+					}
 					continue
 				}
 			}
@@ -249,8 +353,10 @@ func UpdateMessageLoop(s *discordgo.Session, channel model.Channels, servers []m
 	// Edita el mensaje existente
 	_, err := s.ChannelMessageEdit(channel.DiscordChannelId, channel.DiscordMessageId, newMessage)
 	if err != nil {
+		//Si hubo algun error al tratar de editar el mensaje, posiblemente fue elimiando, se procede a dejar limpio el valor en channel para que lo vuelva a crear
+		controllers.SetNullMessages(channel)
+		VerfiicarRespuesta(err.Error(), channel.DiscordChannelId)
 		log.Printf("Error al editar el mensaje: %v", err)
-		// Puedes implementar una lógica de reintento aquí si es necesario
 	} else {
 		log.Println("Mensaje actualizado exitosamente.")
 	}
@@ -325,4 +431,56 @@ func deleteAllMessagesExcept(s *discordgo.Session, channelID string, excludedMes
 	}
 
 	return nil
+}
+
+func GuildDelete(s *discordgo.Session, g *discordgo.GuildDelete) {
+	guilid := g.ID
+	channel := controllers.GetChannelGuildId(guilid)
+	//Se procede a eliminar los servidores
+	controllers.DeleteServers(channel.Uuid)
+	//Se procede a eliminar el canal
+	controllers.DeleteChannels(channel.DiscordGuildId)
+}
+
+func VerfiicarRespuesta(response string, channelId string) {
+	// 1. Encontrar el inicio del JSON
+	startIndex := strings.Index(response, "{")
+	if startIndex == -1 {
+		fmt.Println("No se encontró el inicio del JSON")
+		return
+	}
+
+	// 2. Extraer la parte JSON de la cadena
+	jsonString := response[startIndex:]
+
+	// 3. Definir una estructura para el JSON
+	var errorResponse struct {
+		Message string `json:"message"`
+		Code    int    `json:"code"`
+	}
+
+	// 4. Deserializar la cadena JSON en la estructura
+	err := json.Unmarshal([]byte(jsonString), &errorResponse)
+	if err != nil {
+		fmt.Println("Error al deserializar JSON:", err)
+		return
+	}
+
+	// 5. Acceder al valor del mensaje
+	message := errorResponse.Message
+	fmt.Println("Mensaje del error:", message)
+	switch message {
+	case "Missing Access":
+		//Si se perdieron los permisos, se procede a eliminar cualquier registro
+		//Buscar el canal
+		channel := controllers.GetChannel(channelId)
+		if channel.DiscordChannelId != "" {
+			//Si se encontro, se procede a eliminar los servidores
+			controllers.DeleteServers(channel.Uuid)
+			//Se elimina el canal
+			controllers.DeleteChannels(channel.DiscordGuildId)
+		}
+		break
+	}
+
 }

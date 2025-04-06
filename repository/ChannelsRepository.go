@@ -30,3 +30,11 @@ func UpdateChannel(data model.Channels) (model.Channels, error) {
 	}
 	return data, nil
 }
+
+func SetNullMessage(model model.Channels) {
+	DB.Debug().Unscoped().Model(&model).Updates(map[string]interface{}{"discord_message_id": nil})
+}
+
+func DeleteChannel(query string) {
+	DB.Debug().Where(query).Model(&model.Channels{}).Unscoped().Limit(1).Delete(&model.Channels{})
+}
