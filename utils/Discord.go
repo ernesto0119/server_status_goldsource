@@ -285,7 +285,7 @@ func Ready(s *discordgo.Session, event *discordgo.Ready) {
 			if channel.DiscordMessageIdDelete != "" {
 				err := deleteAllMessagesExcept(s, channel.DiscordChannelId, channel.DiscordMessageId)
 				if err != nil {
-					log.Printf("Error al eliminar los mensajes: %v", err)
+					log.Printf("Error al eliminar los mensajes (2): %v", err)
 					VerfiicarRespuesta(err.Error(), channel.DiscordChannelId)
 					continue
 				}
@@ -321,7 +321,19 @@ func Ready(s *discordgo.Session, event *discordgo.Ready) {
 
 			//Se procede a buscar los servidores asociados al canal
 			servers := controllers.GetServersChannel(channel.Uuid)
-			go UpdateMessageLoop(s, channel, servers)
+			if len(servers) > 0 {
+				go UpdateMessageLoop(s, channel, servers)
+			} else {
+				maxIntentos := 20
+				if channel.ContErr <= maxIntentos {
+					s.ChannelMessageSend(channel.DiscordChannelId, fmt.Sprintf("No hemos encontrado un servidor a enlistar, se llevan %d intentos fallidos, luego de %d intentos fallidos, dejare de enviar mensajes", channel.ContErr, maxIntentos))
+					channel.ContErr = channel.ContErr + 1
+					controllers.UpdateChannel(channel)
+				} else {
+					s.ChannelMessageSend(channel.DiscordChannelId, "Se ha eliminado de la lista de seguimiento")
+					controllers.DeleteChannels(channel.DiscordGuildId)
+				}
+			}
 		}
 	}
 }
@@ -407,17 +419,19 @@ func deleteAllMessagesExcept(s *discordgo.Session, channelID string, excludedMes
 			if len(messagesToDelete) == 1 {
 				err = s.ChannelMessageDelete(channelID, messagesToDelete[0])
 				if err != nil {
-					log.Printf("Error al eliminar un mensaje %s: %v", messagesToDelete[0], err)
+					log.Printf("Error al eliminar un mensaje (1) %s: %v", messagesToDelete[0], err)
+					return err
 				}
 			} else if len(messagesToDelete) > 1 {
 				err = s.ChannelMessagesBulkDelete(channelID, messagesToDelete)
 				if err != nil {
-					log.Printf("Error al eliminar los mensajes: %v", err)
+					log.Printf("Error al eliminar los mensajes (1): %v", err)
 					// If bulk delete fails, try individual deletion as a fallback
 					for _, msgID := range messagesToDelete {
 						err := s.ChannelMessageDelete(channelID, msgID)
 						if err != nil {
-							log.Printf("Error al eliminar un mensaje %s: %v", msgID, err)
+							log.Printf("Error al eliminar un mensaje (2) %s: %v", msgID, err)
+							return err
 						}
 					}
 				}
@@ -471,10 +485,13 @@ func VerfiicarRespuesta(response string, channelId string) {
 	fmt.Println("Mensaje del error:", message)
 	switch message {
 	case "Missing Access":
+	case "Missing Permissions":
 		//Si se perdieron los permisos, se procede a eliminar cualquier registro
 		//Buscar el canal
+		fmt.Println("Se intento eliminar el canal id", channelId)
 		channel := controllers.GetChannel(channelId)
 		if channel.DiscordChannelId != "" {
+			fmt.Println("Se intento borrar el mensaje")
 			//Si se encontro, se procede a eliminar los servidores
 			controllers.DeleteServers(channel.Uuid)
 			//Se elimina el canal
