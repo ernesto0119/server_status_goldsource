@@ -18,7 +18,9 @@ var (
 )
 
 func main() {
-	loadEnv()
+	if os.Getenv("RENDER") == "" {
+		loadEnv()
+	}
 	repository.Init()
 
 	// Lee las variables de entorno
